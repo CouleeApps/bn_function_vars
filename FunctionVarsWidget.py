@@ -12,7 +12,7 @@ else:
     from PySide2.QtWidgets import QWidget, QTableWidget, QTableWidgetItem, QHBoxLayout, QHeaderView, QAbstractItemView
 
 from binaryninja import BinaryView, Function, VariableSourceType, ThemeColor, LLIL_REG_IS_TEMP, MediumLevelILFunction, \
-    FunctionGraphType, LowLevelILFunction, HighLevelILFunction, Variable
+    FunctionGraphType, LowLevelILFunction, HighLevelILFunction, Variable, ILRegister
 from binaryninjaui import DockContextHandler, UIActionHandler, UIContextNotification, UIContext, ViewLocation, View, \
     ViewFrame, getThemeColor
 
@@ -49,8 +49,8 @@ class FunctionVarsWidget(QWidget, DockContextHandler, UIContextNotification):
 
         UIContext.registerNotification(self)
 
-    def __del__(self):
-        UIContext.unregisterNotification(self)
+    # def __del__(self):
+    #     UIContext.unregisterNotification(self)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         self.m_contextMenuManager.show(self.m_menu, self.actionHandler)
@@ -76,17 +76,23 @@ class FunctionVarsWidget(QWidget, DockContextHandler, UIContextNotification):
             self.table.setItem(0, 0, QTableWidgetItem("No Function Selected"))
             self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         else:
-            self.table.setColumnCount(4)
-            self.table.setHorizontalHeaderLabels(["Type", "Variable", "Storage", f"Value at 0x{self.address:x}"])
+            self.table.setColumnCount(5)
+            self.table.setHorizontalHeaderLabels(["Index", "Type", "Variable", "Storage", f"Value at 0x{self.address:x}"])
 
             # Gotta set these after setColumnCount()
             self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
             self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
             self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
             self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+            self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
 
             vars = self.function.vars
             self.table.setRowCount(len(vars))
+
+            reg_vars = []
+            for reg in self.function.arch.regs.keys():
+                reg_vars.append(Variable(self.function, VariableSourceType.RegisterVariableSourceType, 0, self.function.arch.regs[reg].index, reg))
+            vars = reg_vars + vars
 
             llil: LowLevelILFunction = self.function.llil
             mlil: MediumLevelILFunction = self.function.mlil
@@ -95,19 +101,21 @@ class FunctionVarsWidget(QWidget, DockContextHandler, UIContextNotification):
             mlil_instr = None
             hlil_instr = None
 
-            if view_type == FunctionGraphType.LowLevelILFunctionGraph:
-                llil_instr = llil[instr_index]
-            if view_type == FunctionGraphType.MediumLevelILFunctionGraph:
-                mlil_instr = mlil[instr_index]
-                llil_instr = mlil_instr.llil
-            if view_type == FunctionGraphType.HighLevelILFunctionGraph:
-                hlil_instr = hlil[instr_index]
-                mlil_instr = hlil_instr.mlil
-                llil_instr = mlil_instr.llil
+            if instr_index != 0xffffffffffffffff:
+                if il_view_type == FunctionGraphType.LowLevelILFunctionGraph:
+                    llil_instr = llil[instr_index]
+                if il_view_type == FunctionGraphType.MediumLevelILFunctionGraph:
+                    mlil_instr = mlil[instr_index]
+                    llil_instr = mlil_instr.llil
+                if il_view_type == FunctionGraphType.HighLevelILFunctionGraph:
+                    hlil_instr = hlil[instr_index]
+                    mlil_instr = hlil_instr.mlil
+                    llil_instr = mlil_instr.llil
 
+            # These are increasingly less useful
             if llil_instr is None and llil.get_instruction_start(self.address) is not None:
                 llil_instr = llil[llil.get_instruction_start(self.address)]
-            if mlil_instr is None and mlil.get_instruction_start(self.address) is not None:
+            if llil_instr is None and mlil_instr is None and mlil.get_instruction_start(self.address) is not None:
                 mlil_instr = mlil[mlil.get_instruction_start(self.address)]
 
             # Var accessors
@@ -150,7 +158,10 @@ class FunctionVarsWidget(QWidget, DockContextHandler, UIContextNotification):
                     reg = self.function.arch.get_reg_name(var.storage)
                     storage_str = f"Register[{reg}]"
                     # Classy
-                    if not LLIL_REG_IS_TEMP(var.storage):
+                    if LLIL_REG_IS_TEMP(var.storage):
+                        conts_str = str(get_reg_value_after(ILRegister(self.function.arch, var.storage)))
+                        referenced = str(get_reg_value_at(ILRegister(self.function.arch, var.storage))) != conts_str
+                    else:
                         conts_str = str(get_reg_value_after(reg))
                         referenced = str(get_reg_value_at(reg)) != conts_str
                 elif var.source_type == VariableSourceType.FlagVariableSourceType:
@@ -159,6 +170,7 @@ class FunctionVarsWidget(QWidget, DockContextHandler, UIContextNotification):
                     referenced = str(get_flag_value_at(var.storage)) != conts_str
 
                 # Build row
+                index_item = QTableWidgetItem(str(i))
                 type_item = QTableWidgetItem(str(var.type))
                 name_item = QTableWidgetItem(var.name)
                 storage_item = QTableWidgetItem(storage_str)
@@ -166,6 +178,7 @@ class FunctionVarsWidget(QWidget, DockContextHandler, UIContextNotification):
 
                 # Highlight referenced/changed rows
                 if referenced:
+                    index_item.setBackground(getThemeColor(ThemeColor.BackgroundHighlightLightColor))
                     type_item.setBackground(getThemeColor(ThemeColor.BackgroundHighlightLightColor))
                     name_item.setBackground(getThemeColor(ThemeColor.BackgroundHighlightLightColor))
                     storage_item.setBackground(getThemeColor(ThemeColor.BackgroundHighlightLightColor))
@@ -173,13 +186,15 @@ class FunctionVarsWidget(QWidget, DockContextHandler, UIContextNotification):
 
                 # Dim inactive vars
                 if not active:
+                    index_item.setForeground(getThemeColor(ThemeColor.UncertainColor))
                     type_item.setForeground(getThemeColor(ThemeColor.UncertainColor))
                     name_item.setForeground(getThemeColor(ThemeColor.UncertainColor))
                     storage_item.setForeground(getThemeColor(ThemeColor.UncertainColor))
                     conts_item.setForeground(getThemeColor(ThemeColor.UncertainColor))
 
-                self.table.setItem(i, 0, type_item)
-                self.table.setItem(i, 1, name_item)
-                self.table.setItem(i, 2, storage_item)
-                self.table.setItem(i, 3, conts_item)
+                self.table.setItem(i, 0, index_item)
+                self.table.setItem(i, 1, type_item)
+                self.table.setItem(i, 2, name_item)
+                self.table.setItem(i, 3, storage_item)
+                self.table.setItem(i, 4, conts_item)
 
